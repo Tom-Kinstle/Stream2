@@ -18,11 +18,8 @@ from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 # PDF processing imports
-import pdfplumber
-import gdown
-import requests
-from urllib.parse import urlparse
-import zipfile
+import fitz  # PyMuPDF
+# Removed Google Drive dependencies - documents now in git repo
 
 
 # --------------------
@@ -58,24 +55,42 @@ class HOAQASystem:
         """Load and validate environment variables."""
         load_dotenv()
         
-        self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        # Try Streamlit secrets first, then environment variables  
+        self.openai_api_key = None
+        try:
+            # Import should be at module level, but try here if needed
+            self.openai_api_key = st.secrets.get("OPENAI_API_KEY")
+        except Exception as e:
+            print(f"Streamlit secrets error: {e}")
+            pass
+            
+        # Fallback to environment variable
         if not self.openai_api_key:
-            raise ValueError("OPENAI_API_KEY environment variable is required")
+            self.openai_api_key = os.getenv("OPENAI_API_KEY")
+            
+        if not self.openai_api_key:
+            raise ValueError("OPENAI_API_KEY not found in Streamlit secrets or environment variables")
         
-        # Google Drive folder ID for HOA documents
-        self.google_drive_folder_id = "1m8Kaak_kN5ewMxWMUJqByq06QJPl_5Ql"
+        # Documents are now stored locally in the git repo
         
         # For deployment, use a default data directory or allow environment override
-        hoa_base_dir_env = os.getenv("HOA_BASE_DIR")
+        try:
+            import streamlit as st
+            hoa_base_dir_env = st.secrets.get("HOA_BASE_DIR")
+        except:
+            hoa_base_dir_env = None
+            
+        if not hoa_base_dir_env:
+            hoa_base_dir_env = os.getenv("HOA_BASE_DIR")
+            
         if hoa_base_dir_env:
             self.hoa_base_dir = Path(hoa_base_dir_env).resolve()
         else:
             # Default to a data directory in the app folder
-            self.hoa_base_dir = Path(__file__).parent / "data" / "hoa_documents"
+            self.hoa_base_dir = Path(__file__).parent / "data"
             self.hoa_base_dir.mkdir(parents=True, exist_ok=True)
         
-        # Download documents from Google Drive if directory is empty
-        self.ensure_documents_downloaded()
+        # Documents are stored in git repo - no download needed
 
     def setup_directories(self):
         """Setup required directories."""
@@ -95,11 +110,16 @@ class HOAQASystem:
             encode_kwargs={"normalize_embeddings": True, "batch_size": 16}
         )
 
-    def ensure_documents_downloaded(self):
+    def ensure_documents_downloaded_REMOVED(self):
         """Download HOA documents from Google Drive if not present locally."""
         if self.hoa_base_dir.exists() and any(self.hoa_base_dir.iterdir()):
             print("HOA documents found locally, skipping download.")
             return
+        
+        print(f"HOA base directory: {self.hoa_base_dir}")
+        print(f"Directory exists: {self.hoa_base_dir.exists()}")
+        if self.hoa_base_dir.exists():
+            print(f"Directory contents: {list(self.hoa_base_dir.iterdir())}")
         
         print("Downloading HOA documents from Google Drive...")
         try:
@@ -150,24 +170,24 @@ class HOAQASystem:
             print(f"Error downloading HOA documents: {e}")
             # Continue without documents - app will show appropriate message
 
-    def extract_pdf_text_pdfplumber(self, file_path: str) -> str:
-        """Extract text from PDF using pdfplumber."""
+    def extract_pdf_text_pymupdf(self, file_path: str) -> str:
+        """Extract text from PDF using PyMuPDF (fitz)."""
         try:
             text = ""
-            with pdfplumber.open(file_path) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text += page_text + "\n"
+            doc = fitz.open(file_path)
+            for page_num in range(doc.page_count):
+                page = doc[page_num]
+                text += page.get_text() + "\n"
+            doc.close()
             return text.strip()
         except Exception as e:
-            print(f"pdfplumber failed for {file_path}: {e}")
+            print(f"PyMuPDF failed for {file_path}: {e}")
             return ""
 
     def extract_pdf_file(self, file_path: str) -> str:
-        """Extract text content from a PDF file using pdfplumber."""
-        # Use pdfplumber for text extraction
-        text = self.extract_pdf_text_pdfplumber(file_path)
+        """Extract text content from a PDF file using PyMuPDF."""
+        # Use PyMuPDF for text extraction
+        text = self.extract_pdf_text_pymupdf(file_path)
         if text and len(text.strip()) > 100:  # Check if we got substantial content
             return text
     
@@ -346,7 +366,6 @@ class HOAQASystem:
 
         prompt = f"""
 You are a compliance analyst reviewing HOA governing documents. 
-Answer the question strictly using the provided documents.
 
 QUESTION:
 {question}
@@ -355,7 +374,9 @@ DOCUMENTS:
 {context}
 
 RESPONSE GUIDELINES:
-- Use only the provided documents. Keep responses concise and factual and do not infer or guess.
+- Use only the provided documents. 
+- Keep responses concise and factual and do not infer or guess.
+- Always cite specific section references when available (e.g., "Section 7.4(b)", "Article III", "Section 2.1").
 
 ANSWER:
 """
